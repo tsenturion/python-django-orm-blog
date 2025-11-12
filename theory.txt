@@ -267,6 +267,7 @@ Execution time: 0.008948s [Database: default]
 In [62]:
 ManyRelatedManager 
 
+
 post = Post.objects.get(title="Intro")
 post.tags.remove(intro)
 
