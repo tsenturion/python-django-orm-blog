@@ -424,6 +424,8 @@ In [10]: users = User.objects.annotate(post_count=Count('post'))
 
 In [11]: users = users.order_by("-post_count")
 
+first_user = User.objects.raw('SELECT * FROM blog_user')[0]
+
 In [14]: posts = Post.objects.annotate(Count("tags"))
 
 In [15]: print(posts[0].tags__count)
@@ -597,6 +599,137 @@ select_for_update()
 savepoint()
 savepoint_commit(sid)
 savepoint_rollback(sid)
+
+from django.db import transaction
+
+
+def process_complex_order(order, items):
+    with transaction.atomic():
+        order.status = "processing"
+        order.save()
+
+        items_sid = transaction.savepoint()
+
+        try:
+            for item in items:
+                product = Product.objects.select_for_update().get(id=item.product_id)
+                if product.stock < item.quantity:
+                    transaction.savepoint_rollback(items_sid)
+                    raise ValueError(f"Недостаточно товара: {product.name}")
+
+                product.stock -= item.quantity
+                product.save()
+
+            transaction.savepoint_commit(items_sid)
+
+            payment_sid = transaction.savepoint()
+
+            try:
+                process_payment(order)
+                transaction.savepoint_commit(payment_sid)
+
+                order.status = "completed"
+                order.save()
+
+            except PaymentError:
+                transaction.savepoint_rollback(payment_sid)
+                order.status = "payment_failed"
+                order.save()
+
+        except ValueError:
+            raise
+
+from django.db.models import Count, Q
+from django.db import connection
+
+complex_query = (
+    Post.objects.annotate(comment_count=Count("comments"), tag_count=Count("tags"))
+    .filter(Q(comment_count__gte=10) | Q(tag_count__gte=5))
+    .select_related("author")
+)
+
+print(complex_query.explain())
+
+"""
+->  Hash Join  (cost=35.50..60.53 rows=100 width=40)
+  ->  Seq Scan on blog_post  (cost=0.00..25.00 rows=100 width=20)
+  ->  Hash  (cost=20.50..20.50 rows=50 width=20)
+        ->  Index Scan using blog_tags_pkey on blog_tags
+"""
+
+for pid, title in Post.objects.values_list("id", "title"):
+    print(pid, "|", title)
+
+# SELECT "blog_post"."id",
+#        "blog_post"."title"
+#   FROM "blog_post"
+
+# Execution time: 0.000571s [Database: default]
+# => 1 | Intro
+# => 2 | Update
+
+
+
+
+
+ps = Post.objects.only("title")
+post = ps[0]  # Первый пост, загружаются только заголовки (и id)
+# SELECT "blog_post"."id",
+#        "blog_post"."title"
+#   FROM "blog_post"
+#  LIMIT 1
+
+# Execution time: 0.000327s [Database: default]
+
+post.title
+# => 'Intro'
+post.body  # Поле потребует загрузки
+# SELECT "blog_post"."id",
+#        "blog_post"."body"
+#   FROM "blog_post"
+#  WHERE "blog_post"."id" = 1
+#  LIMIT 21
+
+# Execution time: 0.000262s [Database: default]
+
+# => 'Hi, my name is Bob!'
+
+
+
+posts = Post.objects.all()  # 1 запрос
+for post in posts:
+    author_name = post.author.name  # +N запросов
+
+
+
+
+post = Post.objects.select_related("author").only("title", "author__email")[0]
+print((post.title, post.author.email))  # => ('Intro', 'bob@blogs.org')
+print(post.body)  # => 'Hi, my name is Bob!'
+print(post.author.first_name)  # => 'Bob'
+
+
+
+
+class Post(models.Model):
+    title = models.CharField(max_length=200)
+    tags = models.ManyToManyField("Tag")
+    author = models.ForeignKey("Author", on_delete=models.CASCADE)
+
+
+class Comment(models.Model):
+    post = models.ForeignKey(Post, related_name="comments")
+    text = models.TextField()
+    author = models.ForeignKey("Author", on_delete=models.CASCADE)
+
+
+# загрузит все связанные данные за 3 запроса
+posts = Post.objects.prefetch_related(
+    "comments",  # загрузит все комментарии
+    "tags",  # загрузит все теги
+    "comments__author",  # загрузит авторов комментариев
+).select_related("author")  # загрузит автора поста через JOIN
+
 
 
 from django.db import models, transaction
